@@ -15,7 +15,7 @@
       "source": "/(.*)",
       "has": [
         {
-          "type": "scheme",
+          "type": "host",
           "value": "http"
         }
       ],
