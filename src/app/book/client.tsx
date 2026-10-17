@@ -328,7 +328,37 @@ function StepSelectExamCenter({
   onNext: (center: string) => void;
 }) {
   const [center, setCenter] = useState(selectedCenter);
+  const [centers, setCenters] = useState<string[]>(EXAM_CENTERS);
+  const [loadingCenters, setLoadingCenters] = useState(true);
   const [error, setError] = useState('');
+
+  // Load the admin-managed list of exam centers. Fall back to the built-in
+  // list if the request fails so the step always works.
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/exam-centers', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled) return;
+        if (Array.isArray(data) && data.length > 0) {
+          setCenters(data.filter((c: unknown) => typeof c === 'string' && c.trim()));
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoadingCenters(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // If the previously selected center is no longer offered, clear it.
+  useEffect(() => {
+    if (!loadingCenters && center && !centers.includes(center)) {
+      setCenter('');
+    }
+  }, [loadingCenters, centers, center]);
 
   const handleSubmit = () => {
     if (!center) { setError('Please select an exam center'); return; }
@@ -340,38 +370,55 @@ function StepSelectExamCenter({
       <h2 className="text-2xl font-bold text-[#1e3a5f] mb-2">Select Exam Center</h2>
       <p className="text-gray-500 mb-6">Choose the exam center for your travel booking.</p>
 
-      <div className="grid gap-3 mb-8">
-        {EXAM_CENTERS.map((c) => {
-          const selected = center === c;
-          return (
-            <button
-              key={c}
-              type="button"
-              onClick={() => { setCenter(c); setError(''); }}
-              className={`w-full text-left p-4 rounded-xl border-2 transition-all ${
-                selected
-                  ? 'border-[#1e3a5f] bg-[#1e3a5f]/5 shadow-md'
-                  : 'border-gray-100 hover:border-gray-200 bg-white'
-              }`}
-            >
-              <div className="flex items-center gap-3">
-                <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${
-                  selected ? 'border-[#1e3a5f]' : 'border-gray-300'
-                }`}>
-                  {selected && <div className="w-2.5 h-2.5 rounded-full bg-[#1e3a5f]" />}
+      {loadingCenters ? (
+        <div className="text-center py-12 mb-8">
+          <div className="w-8 h-8 border-4 border-[#1e3a5f] border-t-transparent rounded-full animate-spin mx-auto" />
+          <p className="text-gray-500 mt-4">Loading exam centers...</p>
+        </div>
+      ) : centers.length === 0 ? (
+        <div className="text-center py-12 mb-8 bg-gray-50 rounded-xl">
+          <p className="text-gray-500">No exam centers are available right now. Please check back later.</p>
+        </div>
+      ) : (
+        <div className="grid gap-3 mb-8">
+          {centers.map((c) => {
+            const selected = center === c;
+            return (
+              <button
+                key={c}
+                type="button"
+                onClick={() => { setCenter(c); setError(''); }}
+                className={`w-full text-left p-4 rounded-xl border-2 transition-all ${
+                  selected
+                    ? 'border-[#1e3a5f] bg-[#1e3a5f]/5 shadow-md'
+                    : 'border-gray-100 hover:border-gray-200 bg-white'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center flex-shrink-0 ${
+                    selected ? 'border-[#1e3a5f]' : 'border-gray-300'
+                  }`}>
+                    {selected && <div className="w-2.5 h-2.5 rounded-full bg-[#1e3a5f]" />}
+                  </div>
+                  <span className={`font-medium ${selected ? 'text-[#1e3a5f]' : 'text-gray-700'}`}>{c}</span>
                 </div>
-                <span className={`font-medium ${selected ? 'text-[#1e3a5f]' : 'text-gray-700'}`}>{c}</span>
-              </div>
-            </button>
-          );
-        })}
-      </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {error && <p className="text-sm text-red-500 mb-4 text-center">{error}</p>}
 
       <div className="flex gap-3">
         <button onClick={onBack} className="btn-outline flex-1 justify-center">Back</button>
-        <button onClick={handleSubmit} className="btn-primary flex-1 justify-center">Continue</button>
+        <button
+          onClick={handleSubmit}
+          disabled={loadingCenters || centers.length === 0}
+          className="btn-primary flex-1 justify-center disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          Continue
+        </button>
       </div>
     </div>
   );
@@ -1091,38 +1138,39 @@ export default function BookPageClient({ initialPrice = 500 }: { initialPrice: n
           paymentCompleted = true;
           console.log(`[Payment] Razorpay handler fired: payment_id=${response.razorpay_payment_id}`);
           fireEvent('handler_fired', `payment_id=${response.razorpay_payment_id}`);
-          setProcessing(true);
-          try {
-            const verifyRes = await fetch('/api/razorpay/verify', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                booking_id: bookingId,
-                razorpay_order_id: response.razorpay_order_id,
-                razorpay_payment_id: response.razorpay_payment_id,
-                razorpay_signature: response.razorpay_signature,
-              }),
-            });
 
-            if (verifyRes.ok) {
-              console.log(`[Payment] Payment verified for ${bookingId}, opening confirmation page`);
-              router.replace(`/success?id=${encodeURIComponent(bookingId)}`);
-            } else {
-              const errData = await verifyRes.json().catch(() => ({}));
-              console.error(`[Payment] Verification failed: ${errData.error || ''}`);
-              setPaymentError(errData.error || 'Payment verification failed. Please contact support.');
-              setProcessing(false);
-              paymentBusyRef.current = false;
-            }
-          } catch (verifyErr) {
-            console.error('[Payment] Verify request error:', verifyErr);
-            // The payment may have succeeded even though this fetch failed —
-            // the /book?id= poll + /api/razorpay/status auto-confirm recover
-            // it, so the customer must NOT be asked to pay again.
-            setPaymentError('Your payment may have been received. We are confirming your booking — please wait. You will NOT be charged again.');
-            setProcessing(false);
-            paymentBusyRef.current = false;
-          }
+          // Land on the confirmation page IMMEDIATELY so the customer never has
+          // to wait on the (slower) server-side Razorpay verification. /success
+          // is the source of truth: it polls the DB-backed status endpoint and
+          // flips to "Booking Confirmed" + Download the moment the server
+          // confirms. This removes the long "verifying" spinner that used to
+          // keep customers stuck on the payment step after a successful payment.
+          router.replace(`/success?id=${encodeURIComponent(bookingId)}`);
+
+          // Verify + confirm in the background (fire-and-forget). The result is
+          // not awaited — /success independently confirms via the status poll,
+          // so a slow/failed verify can never strand the customer.
+          fetch('/api/razorpay/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              booking_id: bookingId,
+              razorpay_order_id: response.razorpay_order_id,
+              razorpay_payment_id: response.razorpay_payment_id,
+              razorpay_signature: response.razorpay_signature,
+            }),
+            keepalive: true,
+          })
+            .then((verifyRes) => {
+              if (verifyRes.ok) {
+                console.log(`[Payment] Payment verified for ${bookingId}`);
+              } else {
+                console.error(`[Payment] Verify returned ${verifyRes.status} for ${bookingId}`);
+              }
+            })
+            .catch((verifyErr) => {
+              console.error('[Payment] Verify request error:', verifyErr);
+            });
         },
       };
 

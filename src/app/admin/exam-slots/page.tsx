@@ -95,6 +95,12 @@ export default function AdminExamSlots() {
   const [togglingId, setTogglingId] = useState<number | null>(null);
   const messageTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
 
+  // Distinct exam names already in use — offered as suggestions so admin can
+  // reuse an existing exam or type a brand-new one.
+  const examNameOptions = Array.from(
+    new Set(slots.map((s) => (s.exam_name || '').trim()).filter(Boolean))
+  );
+
   const showMessage = (msg: string, type: 'success' | 'error' = 'success') => {
     clearTimeout(messageTimer.current);
     setMessage(msg);
@@ -392,7 +398,13 @@ export default function AdminExamSlots() {
                 onChange={(e) => setForm({ ...form, exam_name: e.target.value })}
                 className="input-field"
                 placeholder="e.g. SBI PO"
+                list="exam-name-options"
               />
+              <datalist id="exam-name-options">
+                {examNameOptions.map((n) => (
+                  <option key={n} value={n} />
+                ))}
+              </datalist>
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">Exam Date *</label>

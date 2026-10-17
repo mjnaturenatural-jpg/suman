@@ -374,6 +374,15 @@ async function ensureSchema(): Promise<void> {
       FOREIGN KEY (slot_id) REFERENCES slots(id) ON DELETE CASCADE
     )`,
     'CREATE INDEX IF NOT EXISTS idx_vehicles_slot_id ON vehicles(slot_id)',
+    // Exam centres shown in the booking flow. Admin-managed so new centres can
+    // be added without a code change.
+    `CREATE TABLE IF NOT EXISTS exam_centers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`,
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_slots_date_id_time ON slots(date_id, time)',
     'CREATE INDEX IF NOT EXISTS idx_slots_date_id ON slots(date_id)',
     'CREATE INDEX IF NOT EXISTS idx_bookings_booking_id ON bookings(booking_id)',
@@ -574,6 +583,36 @@ async function ensureSchema(): Promise<void> {
     } catch (err: any) {
       console.error(`[DB] Failed to seed setting ${key}:`, err?.message || err);
     }
+  }
+
+  // Seed the default exam centres exactly once. A settings flag records that
+  // the initial seed has happened so later admin edits/deletions persist and
+  // are never silently re-created on the next cold start.
+  try {
+    const seededRow = await client.execute({
+      sql: "SELECT value FROM settings WHERE key = 'exam_centers_seeded'",
+    });
+    const alreadySeeded = String((seededRow.rows?.[0] as any)?.value || '') === '1';
+    if (!alreadySeeded) {
+      const defaultCenters = [
+        'G. Pulla Reddy Engineering College',
+        'Brindavan Institute of Technology & Science',
+        'K. V. Subba Reddy Institute of Technology',
+        'Poojya Educational Society',
+        'Unidid Technology, Sanath Nagar, Kurnool',
+      ];
+      for (let i = 0; i < defaultCenters.length; i++) {
+        await client.execute({
+          sql: 'INSERT OR IGNORE INTO exam_centers (name, enabled, sort_order) VALUES (?, 1, ?)',
+          args: [defaultCenters[i], i],
+        });
+      }
+      await client.execute({
+        sql: "INSERT OR REPLACE INTO settings (key, value) VALUES ('exam_centers_seeded', '1')",
+      });
+    }
+  } catch (err: any) {
+    console.error('[DB] Failed to seed exam centers:', err?.message || err);
   }
 
   schemaReady = true;
