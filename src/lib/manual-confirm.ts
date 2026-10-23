@@ -181,9 +181,14 @@ export async function manualConfirmBooking(
       // ---- Vehicle seat accounting (mirrors confirmBooking in lib/razorpay.ts) ----
       const vehicleId = booking.vehicle_id != null ? Number(booking.vehicle_id) : 0;
       if (vehicleId > 0) {
-        const { incrementVehicleBookedSeats, getVehicleInTx } = await import('@/lib/vehicles');
+        const { buildSeatIncrementStatement } = await import('@/lib/vehicles');
         const seatCount = Number(booking.passenger_count) || 0;
-        const ok = await incrementVehicleBookedSeats(tx as any, vehicleId, seatCount);
+        // Seat increment + vehicle read in a single round trip.
+        const [seatUpdate, vehicleResult] = await tx.batch([
+          buildSeatIncrementStatement(vehicleId, seatCount),
+          { sql: 'SELECT * FROM vehicles WHERE id = ?', args: [vehicleId] },
+        ]);
+        const ok = Number(seatUpdate.rowsAffected) === 1;
         if (!ok) {
           await tx.rollback();
           return {
@@ -191,7 +196,7 @@ export async function manualConfirmBooking(
             error: 'The assigned vehicle no longer has enough seats. Reduce its bookings or increase capacity first.',
           };
         }
-        const vehicle = await getVehicleInTx(tx as any, vehicleId);
+        const vehicle = rowToObject(vehicleResult) as any;
         if (vehicle) {
           await tx.execute({
             sql: `UPDATE bookings SET vehicle_type = ?, vehicle_number = ?, vehicle_departure_time = ?, vehicle_arrival_time = ? WHERE booking_id = ?`,

@@ -29,7 +29,7 @@ export async function GET(
 
   try {
     const result = await dbExecute(
-      'SELECT booking_id, payment_status, serial_number, receipt_token, amount FROM bookings WHERE booking_id = ?',
+      'SELECT booking_id, payment_status, serial_number, receipt_token, amount, razorpay_order_id FROM bookings WHERE booking_id = ?',
       [bookingId]
     );
     const booking = rowToObject(result);
@@ -81,12 +81,7 @@ export async function GET(
     }
 
     // Check if there's a Razorpay order to poll
-    const orderResult = await dbExecute(
-      "SELECT razorpay_order_id FROM bookings WHERE booking_id = ? AND razorpay_order_id != ''",
-      [bookingId]
-    );
-    const orderRow = rowToObject(orderResult);
-    const razorpayOrderId = orderRow?.razorpay_order_id as string | undefined;
+    const razorpayOrderId = (booking.razorpay_order_id as string) || undefined;
 
     if (razorpayOrderId) {
       try {

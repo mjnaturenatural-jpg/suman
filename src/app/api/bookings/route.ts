@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { dbExecute, rowsToObjects, getDb } from '@/lib/db';
+import { dbBatch, dbExecute, rowsToObjects, getDb } from '@/lib/db';
 import { getAdminSession } from '@/lib/auth';
 import { generateBookingId } from '@/lib/utils';
 
@@ -84,7 +84,14 @@ export async function POST(request: Request) {
 
     const ticketCount = passengers.length;
 
-    const slotResult = await dbExecute("SELECT * FROM slots WHERE id = ? AND enabled = 1 AND status = 'active'", [slot_id]);
+    // Slot + global price are independent — one round trip for both.
+    const [slotResult, priceResult] = await dbBatch(
+      [
+        { sql: "SELECT * FROM slots WHERE id = ? AND enabled = 1 AND status = 'active'", args: [slot_id] },
+        { sql: "SELECT value FROM settings WHERE key = 'price_per_ticket'" },
+      ],
+      'read'
+    );
     const slot = rowsToObjects(slotResult)[0];
     if (!slot) {
       return NextResponse.json({ error: 'This exam slot has expired. Please choose another available slot.' }, { status: 400 });
@@ -97,7 +104,6 @@ export async function POST(request: Request) {
     if (slotPrice > 0) {
       pricePerTicket = slotPrice;
     } else {
-      const priceResult = await dbExecute("SELECT value FROM settings WHERE key = 'price_per_ticket'");
       const priceRow = priceResult.rows[0] as any;
       pricePerTicket = priceRow ? Number(priceRow.value) : 500;
     }
@@ -105,35 +111,30 @@ export async function POST(request: Request) {
     const bookingId = generateBookingId();
 
     const db = await getDb();
-    const tx = await db.transaction('write');
-    try {
-      await tx.execute({
-         sql: `INSERT INTO bookings
-           (booking_id, date_id, slot_id, passenger_count, amount, payment_status, exam_center)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-         args: [
-           bookingId,
-           date_id,
-           slot_id,
-           ticketCount,
-           amount,
-           'pending',
-           exam_center,
-         ],
-      });
+    // The booking row and every passenger row are written as one atomic batch
+    // (single round trip) — nothing is persisted if any insert fails.
+    const statements = [
+      {
+        sql: `INSERT INTO bookings
+          (booking_id, date_id, slot_id, passenger_count, amount, payment_status, exam_center)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        args: [
+          bookingId,
+          date_id,
+          slot_id,
+          ticketCount,
+          amount,
+          'pending',
+          exam_center,
+        ] as (string | number)[],
+      },
+      ...passengers.map((p: any) => ({
+        sql: 'INSERT INTO passengers (booking_id, name, mobile, gender) VALUES (?, ?, ?, ?)',
+        args: [bookingId, p.name, p.mobile, p.gender] as (string | number)[],
+      })),
+    ];
 
-      for (const p of passengers) {
-        await tx.execute({
-          sql: 'INSERT INTO passengers (booking_id, name, mobile, gender) VALUES (?, ?, ?, ?)',
-          args: [bookingId, p.name, p.mobile, p.gender],
-        });
-      }
-
-      await tx.commit();
-    } catch (e) {
-      await tx.rollback();
-      throw e;
-    }
+    await db.batch(statements, 'write');
 
     console.log(`[Booking] Created booking ${bookingId} for ${ticketCount} passengers, ₹${amount}`);
     return NextResponse.json(

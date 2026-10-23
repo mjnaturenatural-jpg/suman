@@ -1,4 +1,4 @@
-import { dbExecute, rowsToObjects, rowToObject } from '@/lib/db';
+import { dbExecute, rowsToObjects, rowToObject, type DbStatement } from '@/lib/db';
 
 export const VEHICLE_STATUSES = ['available', 'full', 'cancelled'] as const;
 export type VehicleStatus = (typeof VEHICLE_STATUSES)[number];
@@ -106,6 +106,21 @@ export interface TxLike {
 }
 
 /**
+ * Build the guarded seat-increment statement.
+ * Exposed separately so callers can batch it together with other statements
+ * (one round trip instead of two).
+ */
+export function buildSeatIncrementStatement(vehicleId: number, count: number): DbStatement {
+  return {
+    sql: `UPDATE vehicles
+      SET booked_seats = booked_seats + ?,
+          status = CASE WHEN booked_seats + ? >= total_seats THEN 'full' ELSE 'available' END
+      WHERE id = ? AND status = 'available' AND booked_seats + ? <= total_seats`,
+    args: [count, count, vehicleId, count],
+  };
+}
+
+/**
  * Atomically increment a vehicle's booked_seats inside a write transaction.
  * Fails (returns false) when the vehicle is not available or would overflow —
  * this is the server-side overbooking guard. Callers must roll back the
@@ -116,13 +131,8 @@ export async function incrementVehicleBookedSeats(
   vehicleId: number,
   count: number
 ): Promise<boolean> {
-  const result = await tx.execute({
-    sql: `UPDATE vehicles
-      SET booked_seats = booked_seats + ?,
-          status = CASE WHEN booked_seats + ? >= total_seats THEN 'full' ELSE 'available' END
-      WHERE id = ? AND status = 'available' AND booked_seats + ? <= total_seats`,
-    args: [count, count, vehicleId, count],
-  });
+  const stmt = buildSeatIncrementStatement(vehicleId, count);
+  const result = await tx.execute({ sql: stmt.sql, args: stmt.args });
   return Number(result.rowsAffected) === 1;
 }
 

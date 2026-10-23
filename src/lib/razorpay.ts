@@ -245,21 +245,25 @@ export async function confirmBooking(
       const dateId = booking.date_id as number;
       const slotId = booking.slot_id as number;
 
-      // Store the razorpay_order_id (idempotent)
-      await tx.execute({
-        sql: "UPDATE bookings SET razorpay_order_id = ? WHERE booking_id = ? AND (razorpay_order_id IS NULL OR razorpay_order_id = '')",
-        args: [razorpay_order_id, booking_id],
-      });
+      // Store the razorpay_order_id (idempotent) and read the current serial
+      // high-water mark in a single round trip.
+      const maxSerialSql =
+        "SELECT MAX(serial_number) as max_serial FROM bookings WHERE date_id = ? AND slot_id = ? AND payment_status = 'confirmed'";
+      const [, maxResult] = await tx.batch([
+        {
+          sql: "UPDATE bookings SET razorpay_order_id = ? WHERE booking_id = ? AND (razorpay_order_id IS NULL OR razorpay_order_id = '')",
+          args: [razorpay_order_id, booking_id],
+        },
+        {
+          sql: maxSerialSql,
+          args: [dateId, slotId],
+        },
+      ]);
+      let maxSerial = rowToObject(maxResult)?.max_serial ? Number(rowToObject(maxResult)!.max_serial) : 0;
 
       // Atomically compute and assign the next serial number
       let serialNumber: number | null = null;
       for (let attempt = 0; attempt < 5; attempt++) {
-        const maxResult = await tx.execute({
-          sql: "SELECT MAX(serial_number) as max_serial FROM bookings WHERE date_id = ? AND slot_id = ? AND payment_status = 'confirmed'",
-          args: [dateId, slotId],
-        });
-        const maxRow = rowToObject(maxResult);
-        const maxSerial = maxRow?.max_serial ? Number(maxRow.max_serial) : 0;
         const nextSerial = maxSerial > 0 ? maxSerial + 1 : base;
 
         try {
@@ -286,6 +290,9 @@ export async function confirmBooking(
           break;
         } catch (err: any) {
           if (err?.message?.includes('UNIQUE constraint') || err?.message?.includes('idx_bookings_serial')) {
+            // Another booking took this serial — re-read the high-water mark.
+            const retryMax = rowToObject(await tx.execute({ sql: maxSerialSql, args: [dateId, slotId] }));
+            maxSerial = retryMax?.max_serial ? Number(retryMax.max_serial) : 0;
             continue;
           }
           throw err;
@@ -305,9 +312,14 @@ export async function confirmBooking(
       // atomically when another booking took the remaining seats meanwhile.
       const vehicleId = booking.vehicle_id != null ? Number(booking.vehicle_id) : 0;
       if (vehicleId > 0) {
-        const { incrementVehicleBookedSeats, getVehicleInTx } = await import('@/lib/vehicles');
+        const { buildSeatIncrementStatement } = await import('@/lib/vehicles');
         const seatCount = Number(booking.passenger_count) || 0;
-        const ok = await incrementVehicleBookedSeats(tx as any, vehicleId, seatCount);
+        // Seat increment + vehicle read in a single round trip.
+        const [seatUpdate, vehicleResult] = await tx.batch([
+          buildSeatIncrementStatement(vehicleId, seatCount),
+          { sql: 'SELECT * FROM vehicles WHERE id = ?', args: [vehicleId] },
+        ]);
+        const ok = Number(seatUpdate.rowsAffected) === 1;
         if (!ok) {
           await tx.rollback();
           console.error(`[confirmBooking] ✗ No seats left on vehicle ${vehicleId} for booking ${booking_id} — seats not deducted, booking left pending`);
@@ -318,7 +330,7 @@ export async function confirmBooking(
         }
         // Refresh the vehicle snapshot on the booking so the receipt always
         // shows the details that were valid at confirmation time (Part 14).
-        const vehicle = await getVehicleInTx(tx as any, vehicleId);
+        const vehicle = rowToObject(vehicleResult) as any;
         if (vehicle) {
           await tx.execute({
             sql: `UPDATE bookings SET vehicle_type = ?, vehicle_number = ?, vehicle_departure_time = ?, vehicle_arrival_time = ? WHERE booking_id = ?`,

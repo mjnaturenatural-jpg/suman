@@ -1,36 +1,51 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { dbExecute, rowsToObjects } from '@/lib/db';
+import { dbBatch, dbExecute, rowsToObjects } from '@/lib/db';
 import { getAdminSession } from '@/lib/auth';
-import { getVehiclesForSlots, isVehicleSelectable } from '@/lib/vehicles';
+import { decorateVehicle, isVehicleSelectable, type VehicleRecord } from '@/lib/vehicles';
 
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     const dateId = searchParams.get('date_id');
 
-    let result;
+    let slotsSql: string;
+    let vehiclesSql: string;
+    let slotsArgs: (string | number)[] = [];
     if (dateId) {
       // Public / book-page query — only active slots
-      result = await dbExecute(
-        "SELECT * FROM slots WHERE date_id = ? AND status = 'active' AND enabled = 1 ORDER BY time ASC",
-        [Number(dateId)]
-      );
+      slotsSql = "SELECT * FROM slots WHERE date_id = ? AND status = 'active' AND enabled = 1 ORDER BY time ASC";
+      vehiclesSql = "SELECT * FROM vehicles WHERE slot_id IN (SELECT id FROM slots WHERE date_id = ? AND status = 'active' AND enabled = 1) ORDER BY departure_time ASC, id ASC";
+      slotsArgs = [Number(dateId)];
     } else {
       // Admin query — all slots with their date
-      result = await dbExecute(
-        `SELECT s.*, d.date FROM slots s
+      slotsSql = `SELECT s.*, d.date FROM slots s
          JOIN dates d ON s.date_id = d.id
-         ORDER BY d.date DESC, s.time ASC`
-      );
+         ORDER BY d.date DESC, s.time ASC`;
+      vehiclesSql = `SELECT * FROM vehicles WHERE slot_id IN (SELECT s.id FROM slots s JOIN dates d ON s.date_id = d.id) ORDER BY departure_time ASC, id ASC`;
     }
 
-    const slots = rowsToObjects(result);
+    // Slots and their vehicles are independent — one round trip for both.
+    const [slotsResult, vehiclesResult] = await dbBatch(
+      [
+        { sql: slotsSql, args: slotsArgs },
+        { sql: vehiclesSql, args: slotsArgs },
+      ],
+      'read'
+    );
+
+    const slots = rowsToObjects(slotsResult);
 
     // Attach vehicles (backward compatible: old slots simply get an empty list).
     // Public queries only receive selectable vehicles (available + free seats);
     // the admin query receives everything for management.
-    const slotIds = slots.map((s) => Number(s.id)).filter((id) => !isNaN(id));
-    const vehiclesMap = await getVehiclesForSlots(slotIds);
+    const vehiclesMap = new Map<number, VehicleRecord[]>();
+    for (const raw of rowsToObjects(vehiclesResult)) {
+      const v = decorateVehicle(raw as unknown as VehicleRecord);
+      const list = vehiclesMap.get(v.slot_id) || [];
+      list.push(v);
+      vehiclesMap.set(v.slot_id, list);
+    }
+
     const isAdminQuery = !dateId;
     for (const s of slots) {
       const all = vehiclesMap.get(Number(s.id)) || [];

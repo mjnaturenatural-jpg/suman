@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { dbExecute, rowToObject } from '@/lib/db';
+import { dbBatch, rowToObject } from '@/lib/db';
 import { getAdminSession } from '@/lib/auth';
 
 export async function GET() {
@@ -7,29 +7,43 @@ export async function GET() {
   if (!email) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   try {
-    const [totalBookings, totalPayments, activeSlots, revenue, pendingBookings, totalPassengers, totalDates, availableSeats, upcomingSlots, expiredSlots, examSlotVehicleStats] =
-      await Promise.all([
-        dbExecute("SELECT COUNT(*) as cnt FROM bookings WHERE payment_status = 'confirmed'"),
-        dbExecute("SELECT COALESCE(SUM(amount), 0) as total FROM bookings WHERE payment_status = 'confirmed'"),
-        dbExecute("SELECT COUNT(*) as cnt FROM slots WHERE status = 'active' AND enabled = 1"),
-        dbExecute("SELECT COALESCE(SUM(amount), 0) as total FROM bookings WHERE payment_status = 'confirmed'"),
-        dbExecute("SELECT COUNT(*) as cnt FROM bookings WHERE payment_status = 'pending'"),
-        dbExecute('SELECT COUNT(*) as cnt FROM passengers'),
-        dbExecute('SELECT COUNT(*) as cnt FROM dates'),
-        dbExecute("SELECT COALESCE(SUM(passenger_count), 0) as taken FROM bookings WHERE payment_status = 'confirmed'"),
-        dbExecute("SELECT COUNT(*) as cnt FROM slots WHERE status = 'active' AND enabled = 1"),
-        dbExecute("SELECT COUNT(*) as cnt FROM slots WHERE status = 'expired'"),
-        dbExecute(
-          `SELECT
+    // All aggregates are independent — run them as one batch (single round trip)
+    // instead of 11 separate queries.
+    const results = await dbBatch(
+      [
+        { sql: "SELECT COUNT(*) as cnt FROM bookings WHERE payment_status = 'confirmed'" },
+        { sql: "SELECT COALESCE(SUM(amount), 0) as total FROM bookings WHERE payment_status = 'confirmed'" },
+        { sql: "SELECT COUNT(*) as cnt FROM slots WHERE status = 'active' AND enabled = 1" },
+        { sql: "SELECT COUNT(*) as cnt FROM bookings WHERE payment_status = 'pending'" },
+        { sql: 'SELECT COUNT(*) as cnt FROM passengers' },
+        { sql: 'SELECT COUNT(*) as cnt FROM dates' },
+        { sql: "SELECT COALESCE(SUM(passenger_count), 0) as taken FROM bookings WHERE payment_status = 'confirmed'" },
+        { sql: "SELECT COUNT(*) as cnt FROM slots WHERE status = 'expired'" },
+        {
+          sql: `SELECT
              COUNT(*) as vehicle_count,
              COALESCE(SUM(total_seats), 0) as total_capacity,
              COALESCE(SUM(booked_seats), 0) as booked_seats,
              COALESCE(SUM(CASE WHEN vehicles.status = 'available' THEN total_seats - booked_seats ELSE 0 END), 0) as available_seats
            FROM vehicles
            JOIN slots s ON vehicles.slot_id = s.id
-           WHERE vehicles.status != 'cancelled' AND s.status = 'active'`
-        ),
-      ]);
+           WHERE vehicles.status != 'cancelled' AND s.status = 'active'`,
+        },
+      ],
+      'read'
+    );
+
+    const [
+      totalBookings,
+      totalPayments,
+      activeSlots,
+      pendingBookings,
+      totalPassengers,
+      totalDates,
+      availableSeats,
+      expiredSlots,
+      examSlotVehicleStats,
+    ] = results;
 
     const vehicleStats = rowToObject(examSlotVehicleStats) || {};
 
@@ -37,12 +51,12 @@ export async function GET() {
       totalBookings: Number(rowToObject(totalBookings)?.cnt || 0),
       totalPayments: Number(rowToObject(totalPayments)?.total || 0),
       activeSlots: Number(rowToObject(activeSlots)?.cnt || 0),
-      revenue: Number(rowToObject(revenue)?.total || 0),
+      revenue: Number(rowToObject(totalPayments)?.total || 0),
       pendingBookings: Number(rowToObject(pendingBookings)?.cnt || 0),
       totalPassengers: Number(rowToObject(totalPassengers)?.cnt || 0),
       totalDates: Number(rowToObject(totalDates)?.cnt || 0),
       availableSeats: Number(rowToObject(availableSeats)?.taken || 0),
-      upcomingSlots: Number(rowToObject(upcomingSlots)?.cnt || 0),
+      upcomingSlots: Number(rowToObject(activeSlots)?.cnt || 0),
       expiredSlots: Number(rowToObject(expiredSlots)?.cnt || 0),
       examSlots: Number(rowToObject(activeSlots)?.cnt || 0),
       totalVehicles: Number(vehicleStats.vehicle_count || 0),
